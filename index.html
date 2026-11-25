@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal — zsh</title>
+<style>
+@font-face{font-family:Proto;src:url('./0xProtoNerdFontMono-Regular.ttf') format('truetype');font-display:swap}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:#1c1c1c;color:#e8e8e8;font-family:Proto,'0xProto Nerd Font Mono',monospace;font-size:14px}body{display:flex;flex-direction:column}.bar{height:38px;flex-shrink:0;background:#292929;border-bottom:1px solid #383838;display:flex;align-items:center;padding:0 13px;position:relative}.dots{display:flex;gap:8px}.dot{width:12px;height:12px;border-radius:50%}.title{position:absolute;left:50%;transform:translateX(-50%);color:#bdbdbd;font-size:12px;white-space:nowrap}.terminal{flex:1;overflow:auto;padding:14px 16px;cursor:text;line-height:1.55}.output{white-space:pre-wrap;overflow-wrap:anywhere}.green{color:#83d69b}.blue{color:#81b5ed}.muted{color:#999}.error{color:#ff8585}.line{display:flex;align-items:baseline;white-space:pre-wrap;overflow-wrap:anywhere}.line span{white-space:pre-wrap}.line input{flex:1;min-width:1px;background:none;color:inherit;border:0;outline:0;font:inherit;padding:0;caret-color:#ddd}.line[hidden]{display:none}.status{color:#999;font-size:12px;padding:5px 16px;border-top:1px solid #303030}::selection{background:#445c78;color:white}
+</style>
+</head>
+<body>
+<header class="bar"><div class="dots" aria-hidden="true"><i class="dot" style="background:#ff5f57"></i><i class="dot" style="background:#febc2e"></i><i class="dot" style="background:#28c840"></i></div><div class="title">⌁ Terminal — zsh</div></header>
+<main class="terminal" id="terminal"><div class="output" id="output"></div><form class="line" id="line" hidden><span id="prompt"></span><input id="entry" aria-label="Terminal input" autocomplete="off" autocapitalize="off" spellcheck="false"></form></main>
+<footer class="status" id="status">Initializing Python…</footer>
+<script>
+const terminal=document.querySelector('#terminal'), output=document.querySelector('#output'), line=document.querySelector('#line'), entry=document.querySelector('#entry'), prompt=document.querySelector('#prompt'), status=document.querySelector('#status');
+let worker=null, pending=null, history=[], cursor=0, running=false, generation=0;
+const scroll=()=>terminal.scrollTop=terminal.scrollHeight;
+function write(text,cls=''){const s=document.createElement('span');s.className=cls;s.textContent=text;output.append(s);scroll()}
+function shellPrompt(){write('guest@web ','green');write('~ ','blue');write('% ')}
+function showInput(p='',id=null){pending=id;prompt.textContent=p;line.hidden=false;entry.value='';cursor=history.length;entry.focus();scroll()}
+function idle(){running=false;status.textContent='zsh-style terminal · Python stopped';shellPrompt();showInput()}
+const source=`
+let seq=0;
+const send=(type,text='')=>postMessage({type,text});
+onmessage=async ({data})=>{
+ if(data.type!=='run')return;
+ try{
+  importScripts('https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js');
+  const py=await loadPyodide({stdout:s=>send('out',s+'\\n'),stderr:s=>send('err',s+'\\n')});
+  const res=await fetch(data.url,{cache:'no-store'});
+  if(!res.ok)throw Error('Cannot load index.py: HTTP '+res.status);
+  const code=await res.text();
+  py.FS.writeFile('index.py',code);
+  py.globals.set('_request_input',async p=>{
+    const id=++seq;
+    return await new Promise(resolve=>{
+      const listener=e=>{if(e.data.type==='input'&&e.data.id===id){removeEventListener('message',listener);resolve(e.data.value)}};
+      addEventListener('message',listener);
+      postMessage({type:'input',text:String(p),id});
+    });
+  });
+  await py.runPythonAsync(\`import ast, sys, builtins
+class TerminalInput(ast.NodeTransformer):
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id == 'input':
+            return ast.copy_location(ast.Await(value=ast.Call(func=ast.Name(id='_request_input', ctx=ast.Load()), args=node.args or [ast.Constant('')], keywords=node.keywords)), node)
+        return node
+import inspect
+\`);
+  py.globals.set('_source',code);
+  send('ready');
+  await py.runPythonAsync(\`__file__ = 'index.py'
+__name__ = '__main__'
+_tree = ast.fix_missing_locations(TerminalInput().visit(ast.parse(_source, filename='index.py')))
+_result = eval(compile(_tree, 'index.py', 'exec', flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT), globals())
+if inspect.isawaitable(_result):
+    await _result
+\`);
+  send('done');
+ }catch(e){send('err',String(e)+'\\n');send('done')}
+};`;
+function run(){if(worker)worker.terminate();const token=++generation;line.hidden=true;pending=null;running=true;status.textContent='Loading Python runtime…';const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);worker.onmessage=({data:d})=>{if(token!==generation)return;if(d.type==='out')write(d.text);if(d.type==='err')write(d.text,'error');if(d.type==='ready')status.textContent='Python running · Ctrl+C to stop';if(d.type==='input'){status.textContent='Python waiting for input';showInput(d.text,d.id)}if(d.type==='done'){worker.terminate();worker=null;line.hidden=true;idle()}};worker.onerror=e=>{write(e.message+'\n','error');worker.terminate();worker=null;idle()};worker.postMessage({type:'run',url:new URL('./index.py',location.href).href})}
+line.addEventListener('submit',e=>{e.preventDefault();const value=entry.value;history.push(value);write(prompt.textContent+value+'\n');line.hidden=true;if(running&&pending!==null){worker.postMessage({type:'input',id:pending,value});pending=null;status.textContent='Python running';return}const cmd=value.trim();if(['python index.py','python3 index.py','run'].includes(cmd)){run();return}if(cmd==='clear')output.replaceChildren();else if(cmd==='help')write('Commands: python3 index.py, run, clear, help\n');else if(cmd)write('zsh: command not found: '+cmd+'\n','error');idle()});
+entry.addEventListener('keydown',e=>{if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();cursor=Math.max(0,Math.min(history.length,cursor+(e.key==='ArrowUp'?-1:1)));entry.value=history[cursor]||''}});
+document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();output.replaceChildren();if(!running){shellPrompt()}scroll()}if(e.ctrlKey&&e.key.toLowerCase()==='c'&&!window.getSelection().toString()){e.preventDefault();if(worker){generation++;worker.terminate();worker=null;line.hidden=true;pending=null;write('^C\n','error');idle()}else{entry.value='';write('^C\n');idle()}}});
+terminal.addEventListener('click',()=>{if(!window.getSelection().toString()&&!line.hidden)entry.focus()});
+shellPrompt();write('python3 index.py\n');run();
+</script>
+</body>
+</html>
